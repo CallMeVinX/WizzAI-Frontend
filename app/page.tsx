@@ -114,14 +114,22 @@ export default function AppConsole() {
   });
   const [patchSuccess, setPatchSuccess] = useState<string | null>(null);
 
-  // Dedupe
+  // Dedupe State & UX Controls
   const [candidates, setCandidates] = useState<DedupeCandidate[]>([]);
   const [clusters, setClusters] = useState<DedupeCluster[]>([]);
   const [dedupeView, setDedupeView] = useState<"pairs" | "clusters">("pairs");
   const [dedupeLoading, setDedupeLoading] = useState(false);
   const [dedupeStatusFilter, setDedupeStatusFilter] = useState("all");
+  const [dedupeConfidenceFilter, setDedupeConfidenceFilter] = useState("all");
+  const [clusterSizeFilter, setClusterSizeFilter] = useState("all");
+  const [dedupeSearch, setDedupeSearch] = useState("");
+  const [dedupePage, setDedupePage] = useState(1);
+  const [dedupePageSize, setDedupePageSize] = useState(15);
+  const [expandedClusters, setExpandedClusters] = useState<Record<string, boolean>>({});
+  const [allClustersExpanded, setAllClustersExpanded] = useState(false);
   const [triggerDedupeLoading, setTriggerDedupeLoading] = useState(false);
   const [dedupeMessage, setDedupeMessage] = useState<string | null>(null);
+  const [showBackToTop, setShowBackToTop] = useState(false);
 
   // Source Extractor Playground
   const [notesInput, setNotesInput] = useState(
@@ -409,6 +417,100 @@ export default function AppConsole() {
       fetchDedupeClusters();
     }
   }, [activeTab, fetchLeads, fetchDedupeCandidates, fetchDedupeClusters]);
+
+  useEffect(() => {
+    const handleScroll = () => {
+      setShowBackToTop(window.scrollY > 350);
+    };
+    window.addEventListener("scroll", handleScroll, { passive: true });
+    return () => window.removeEventListener("scroll", handleScroll);
+  }, []);
+
+  // ── Dedupe Client Filtering & Pagination ───────────────────────────────────
+
+  const filteredCandidates = useMemo(() => {
+    return candidates.filter((c) => {
+      if (dedupeStatusFilter !== "all" && c.status !== dedupeStatusFilter) {
+        return false;
+      }
+      if (dedupeConfidenceFilter === "very_high" && c.confidence < 0.9) return false;
+      if (dedupeConfidenceFilter === "high" && (c.confidence < 0.8 || c.confidence >= 0.9)) return false;
+      if (dedupeConfidenceFilter === "borderline" && c.confidence >= 0.8) return false;
+
+      if (dedupeSearch.trim()) {
+        const q = dedupeSearch.toLowerCase();
+        const m1 = (c.lead_1?.full_name || "").toLowerCase().includes(q) ||
+                   (c.lead_1?.email || "").toLowerCase().includes(q) ||
+                   (c.lead_1?.company_name || "").toLowerCase().includes(q) ||
+                   String(c.lead_id_1) === q;
+        const m2 = (c.lead_2?.full_name || "").toLowerCase().includes(q) ||
+                   (c.lead_2?.email || "").toLowerCase().includes(q) ||
+                   (c.lead_2?.company_name || "").toLowerCase().includes(q) ||
+                   String(c.lead_id_2) === q;
+        const mExp = (c.explanation || "").toLowerCase().includes(q);
+        if (!m1 && !m2 && !mExp && String(c.id) !== q) return false;
+      }
+      return true;
+    });
+  }, [candidates, dedupeStatusFilter, dedupeConfidenceFilter, dedupeSearch]);
+
+  const filteredClusters = useMemo(() => {
+    return clusters.filter((cl) => {
+      const memberCount = cl.leads?.length || cl.lead_ids?.length || 0;
+      if (clusterSizeFilter === "2" && memberCount !== 2) return false;
+      if (clusterSizeFilter === "3+" && memberCount < 3) return false;
+
+      if (dedupeSearch.trim()) {
+        const q = dedupeSearch.toLowerCase();
+        const matchUUID = cl.group_id.toLowerCase().includes(q);
+        const matchMembers = cl.leads?.some((m) =>
+          (m.full_name || `${m.first_name || ""} ${m.last_name || ""}`).toLowerCase().includes(q) ||
+          (m.email || "").toLowerCase().includes(q) ||
+          (m.company_name || "").toLowerCase().includes(q) ||
+          String(m.id) === q
+        );
+        if (!matchUUID && !matchMembers) return false;
+      }
+      return true;
+    });
+  }, [clusters, clusterSizeFilter, dedupeSearch]);
+
+  const currentDedupeTotal = dedupeView === "pairs" ? filteredCandidates.length : filteredClusters.length;
+  const totalDedupePages = Math.max(1, Math.ceil(currentDedupeTotal / dedupePageSize));
+
+  const paginatedCandidates = useMemo(() => {
+    const start = (dedupePage - 1) * dedupePageSize;
+    return filteredCandidates.slice(start, start + dedupePageSize);
+  }, [filteredCandidates, dedupePage, dedupePageSize]);
+
+  const paginatedClusters = useMemo(() => {
+    const start = (dedupePage - 1) * dedupePageSize;
+    return filteredClusters.slice(start, start + dedupePageSize);
+  }, [filteredClusters, dedupePage, dedupePageSize]);
+
+  const scrollToDedupeTop = () => {
+    const el = document.getElementById("dedupe-panel-top");
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  };
+
+  const toggleCluster = (groupId: string) => {
+    setExpandedClusters((prev) => ({
+      ...prev,
+      [groupId]: prev[groupId] === undefined ? !allClustersExpanded : !prev[groupId],
+    }));
+  };
+
+  const handleToggleAllClusters = () => {
+    const nextState = !allClustersExpanded;
+    setAllClustersExpanded(nextState);
+    const updated: Record<string, boolean> = {};
+    clusters.forEach((cl) => {
+      updated[cl.group_id] = nextState;
+    });
+    setExpandedClusters(updated);
+  };
 
   // ── Status Dot Helpers ────────────────────────────────────────────────────
 
@@ -974,7 +1076,7 @@ export default function AppConsole() {
 
         {/* TAB 3: DEDUPLICATION */}
         {activeTab === "dedupe" && (
-          <div className="space-y-4">
+          <div id="dedupe-panel-top" className="space-y-4">
             {/* Header & Trigger */}
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-lg border border-zinc-200/80 bg-white p-3.5 dark:border-zinc-800/80 dark:bg-[#0c0d12]">
               <div>
@@ -996,63 +1098,264 @@ export default function AppConsole() {
             </div>
 
             {dedupeMessage && (
-              <div className="rounded border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300">
-                {dedupeMessage}
+              <div className="rounded border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300 flex items-center justify-between">
+                <span>{dedupeMessage}</span>
+                <button
+                  onClick={() => setDedupeMessage(null)}
+                  className="text-zinc-400 hover:text-zinc-600 text-xs ml-2"
+                >
+                  ✕
+                </button>
               </div>
             )}
 
-            {/* View Selector */}
-            <div className="flex items-center justify-between border-b border-zinc-200 pb-2 dark:border-zinc-800">
-              <div className="flex gap-2">
+            {/* Quick KPI Stat Chips */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+              <div
+                onClick={() => { setDedupeView("pairs"); setDedupeStatusFilter("all"); setDedupePage(1); }}
+                className={`cursor-pointer rounded-lg border p-3 transition-all ${
+                  dedupeView === "pairs" && dedupeStatusFilter === "all"
+                    ? "border-zinc-900 bg-white shadow-2xs dark:border-zinc-100 dark:bg-zinc-900"
+                    : "border-zinc-200/80 bg-white/60 hover:bg-white dark:border-zinc-800 dark:bg-[#0c0d12]/60 dark:hover:bg-[#0c0d12]"
+                }`}
+              >
+                <span className="text-[10px] uppercase font-mono tracking-wider text-zinc-400">Total Pairs</span>
+                <p className="font-mono text-xl font-bold text-zinc-900 dark:text-zinc-100 mt-0.5">
+                  {candidates.length}
+                </p>
+                <span className="text-[10px] text-zinc-400">Detected candidate edges</span>
+              </div>
+
+              <div
+                onClick={() => { setDedupeView("pairs"); setDedupeStatusFilter("pending"); setDedupePage(1); }}
+                className={`cursor-pointer rounded-lg border p-3 transition-all ${
+                  dedupeView === "pairs" && dedupeStatusFilter === "pending"
+                    ? "border-amber-500 bg-amber-50/40 shadow-2xs dark:border-amber-500/80 dark:bg-amber-950/20"
+                    : "border-zinc-200/80 bg-white/60 hover:bg-white dark:border-zinc-800 dark:bg-[#0c0d12]/60 dark:hover:bg-[#0c0d12]"
+                }`}
+              >
+                <span className="text-[10px] uppercase font-mono tracking-wider text-amber-500">Pending Review</span>
+                <p className="font-mono text-xl font-bold text-amber-600 dark:text-amber-400 mt-0.5">
+                  {candidates.filter((c) => c.status === "pending").length}
+                </p>
+                <span className="text-[10px] text-zinc-400">Requires human decision</span>
+              </div>
+
+              <div
+                onClick={() => { setDedupeView("pairs"); setDedupeStatusFilter("confirmed"); setDedupePage(1); }}
+                className={`cursor-pointer rounded-lg border p-3 transition-all ${
+                  dedupeView === "pairs" && dedupeStatusFilter === "confirmed"
+                    ? "border-emerald-500 bg-emerald-50/40 shadow-2xs dark:border-emerald-500/80 dark:bg-emerald-950/20"
+                    : "border-zinc-200/80 bg-white/60 hover:bg-white dark:border-zinc-800 dark:bg-[#0c0d12]/60 dark:hover:bg-[#0c0d12]"
+                }`}
+              >
+                <span className="text-[10px] uppercase font-mono tracking-wider text-emerald-600 dark:text-emerald-400">Confirmed / Resolved</span>
+                <p className="font-mono text-xl font-bold text-emerald-600 dark:text-emerald-400 mt-0.5">
+                  {candidates.filter((c) => c.status === "confirmed").length}
+                </p>
+                <span className="text-[10px] text-zinc-400">Verified entity matches</span>
+              </div>
+
+              <div
+                onClick={() => { setDedupeView("clusters"); setDedupePage(1); }}
+                className={`cursor-pointer rounded-lg border p-3 transition-all ${
+                  dedupeView === "clusters"
+                    ? "border-purple-600 bg-purple-50/40 shadow-2xs dark:border-purple-400 dark:bg-purple-950/20"
+                    : "border-zinc-200/80 bg-white/60 hover:bg-white dark:border-zinc-800 dark:bg-[#0c0d12]/60 dark:hover:bg-[#0c0d12]"
+                }`}
+              >
+                <span className="text-[10px] uppercase font-mono tracking-wider text-purple-600 dark:text-purple-400">Transitive Clusters</span>
+                <p className="font-mono text-xl font-bold text-purple-600 dark:text-purple-400 mt-0.5">
+                  {clusters.length}
+                </p>
+                <span className="text-[10px] text-zinc-400">Disjoint-Set groupings</span>
+              </div>
+            </div>
+
+            {/* Universal Filter & Search Control Toolbar */}
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-2.5 rounded-lg border border-zinc-200/80 bg-white p-3 dark:border-zinc-800/80 dark:bg-[#0c0d12]">
+              {/* View Switcher */}
+              <div className="flex items-center gap-1.5 bg-zinc-100 dark:bg-zinc-900 p-1 rounded-md shrink-0">
                 <button
-                  onClick={() => setDedupeView("pairs")}
-                  className={`px-2.5 py-1 text-xs rounded font-medium ${
+                  onClick={() => { setDedupeView("pairs"); setDedupePage(1); }}
+                  className={`px-3 py-1 text-xs rounded font-medium transition-colors ${
                     dedupeView === "pairs"
-                      ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
+                      ? "bg-white text-zinc-900 shadow-2xs dark:bg-zinc-800 dark:text-zinc-100"
                       : "text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200"
                   }`}
                 >
-                  Candidate Pairs ({candidates.length})
+                  Candidate Pairs ({filteredCandidates.length})
                 </button>
                 <button
-                  onClick={() => setDedupeView("clusters")}
-                  className={`px-2.5 py-1 text-xs rounded font-medium ${
+                  onClick={() => { setDedupeView("clusters"); setDedupePage(1); }}
+                  className={`px-3 py-1 text-xs rounded font-medium transition-colors ${
                     dedupeView === "clusters"
-                      ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
+                      ? "bg-white text-zinc-900 shadow-2xs dark:bg-zinc-800 dark:text-zinc-100"
                       : "text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200"
                   }`}
                 >
-                  Transitive Clusters ({clusters.length})
+                  Transitive Clusters ({filteredClusters.length})
                 </button>
               </div>
 
-              {dedupeView === "pairs" && (
-                <div className="flex items-center gap-2 text-xs">
-                  <span className="text-zinc-400 font-mono text-[11px]">Filter:</span>
+              {/* Instant Search & Context Filters */}
+              <div className="flex flex-wrap items-center gap-2">
+                {/* Search Bar */}
+                <div className="relative flex-1 sm:flex-initial">
+                  <input
+                    type="text"
+                    placeholder={
+                      dedupeView === "pairs"
+                        ? "Search by name, email, company, ID..."
+                        : "Search by UUID, contact, company..."
+                    }
+                    value={dedupeSearch}
+                    onChange={(e) => {
+                      setDedupeSearch(e.target.value);
+                      setDedupePage(1);
+                    }}
+                    className="w-full sm:w-60 rounded border border-zinc-200 bg-zinc-50/50 px-2.5 py-1 text-xs dark:border-zinc-800 dark:bg-zinc-900 pr-6"
+                  />
+                  {dedupeSearch && (
+                    <button
+                      onClick={() => {
+                        setDedupeSearch("");
+                        setDedupePage(1);
+                      }}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600 text-xs"
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
+
+                {/* View-specific dropdowns */}
+                {dedupeView === "pairs" ? (
+                  <>
+                    <select
+                      value={dedupeStatusFilter}
+                      onChange={(e) => {
+                        setDedupeStatusFilter(e.target.value);
+                        setDedupePage(1);
+                      }}
+                      className="rounded border border-zinc-200 bg-zinc-50/50 px-2 py-1 text-xs dark:border-zinc-800 dark:bg-zinc-900"
+                    >
+                      <option value="all">Status: All</option>
+                      <option value="pending">Pending</option>
+                      <option value="confirmed">Confirmed</option>
+                      <option value="rejected">Rejected</option>
+                    </select>
+
+                    <select
+                      value={dedupeConfidenceFilter}
+                      onChange={(e) => {
+                        setDedupeConfidenceFilter(e.target.value);
+                        setDedupePage(1);
+                      }}
+                      className="rounded border border-zinc-200 bg-zinc-50/50 px-2 py-1 text-xs dark:border-zinc-800 dark:bg-zinc-900"
+                    >
+                      <option value="all">Match: All</option>
+                      <option value="very_high">≥90% Very High</option>
+                      <option value="high">80–89% High</option>
+                      <option value="borderline">&lt;80% Borderline</option>
+                    </select>
+                  </>
+                ) : (
+                  <>
+                    <select
+                      value={clusterSizeFilter}
+                      onChange={(e) => {
+                        setClusterSizeFilter(e.target.value);
+                        setDedupePage(1);
+                      }}
+                      className="rounded border border-zinc-200 bg-zinc-50/50 px-2 py-1 text-xs dark:border-zinc-800 dark:bg-zinc-900"
+                    >
+                      <option value="all">Size: All</option>
+                      <option value="2">2 Members</option>
+                      <option value="3+">3+ Members</option>
+                    </select>
+
+                    <button
+                      onClick={handleToggleAllClusters}
+                      className="rounded border border-zinc-200 bg-zinc-50 px-2.5 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-850 dark:text-zinc-300"
+                    >
+                      {allClustersExpanded ? "Collapse All" : "Expand All"}
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+
+            {/* Top Compact Pagination Bar */}
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-2 px-1 text-xs">
+              <div className="flex items-center gap-3">
+                <span className="font-mono text-[11px] text-zinc-500">
+                  Showing{" "}
+                  <strong className="text-zinc-800 dark:text-zinc-200">
+                    {currentDedupeTotal === 0 ? 0 : (dedupePage - 1) * dedupePageSize + 1}–
+                    {Math.min(dedupePage * dedupePageSize, currentDedupeTotal)}
+                  </strong>{" "}
+                  of <strong className="text-zinc-800 dark:text-zinc-200">{currentDedupeTotal}</strong>{" "}
+                  {dedupeView === "pairs" ? "candidate pairs" : "clusters"}
+                </span>
+
+                <div className="flex items-center gap-1.5">
+                  <span className="text-zinc-400 text-[11px]">Per page:</span>
                   <select
-                    value={dedupeStatusFilter}
-                    onChange={(e) => setDedupeStatusFilter(e.target.value)}
-                    className="rounded border border-zinc-200 bg-zinc-50/50 px-2 py-0.5 text-xs dark:border-zinc-800 dark:bg-zinc-800"
+                    value={dedupePageSize}
+                    onChange={(e) => {
+                      setDedupePageSize(Number(e.target.value));
+                      setDedupePage(1);
+                    }}
+                    className="rounded border border-zinc-200 bg-white px-1.5 py-0.5 text-xs dark:border-zinc-800 dark:bg-zinc-900"
                   >
-                    <option value="all">All</option>
-                    <option value="pending">Pending</option>
-                    <option value="confirmed">Confirmed</option>
-                    <option value="rejected">Rejected</option>
+                    <option value={10}>10</option>
+                    <option value={15}>15</option>
+                    <option value={25}>25</option>
+                    <option value={50}>50</option>
                   </select>
                 </div>
-              )}
+              </div>
+
+              <div className="flex items-center gap-1.5">
+                <button
+                  disabled={dedupePage <= 1}
+                  onClick={() => {
+                    setDedupePage((p) => Math.max(1, p - 1));
+                    scrollToDedupeTop();
+                  }}
+                  className="rounded border border-zinc-200 bg-white px-2.5 py-1 text-xs font-medium disabled:opacity-30 hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:bg-zinc-800"
+                >
+                  Prev
+                </button>
+                <span className="px-2 font-mono text-[11px] text-zinc-500">
+                  Page {dedupePage} of {totalDedupePages}
+                </span>
+                <button
+                  disabled={dedupePage >= totalDedupePages}
+                  onClick={() => {
+                    setDedupePage((p) => Math.min(totalDedupePages, p + 1));
+                    scrollToDedupeTop();
+                  }}
+                  className="rounded border border-zinc-200 bg-white px-2.5 py-1 text-xs font-medium disabled:opacity-30 hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:bg-zinc-800"
+                >
+                  Next
+                </button>
+              </div>
             </div>
 
             {/* Pairwise Conflict Cards */}
             {dedupeView === "pairs" && (
               <div className="space-y-3">
                 {dedupeLoading ? (
-                  <p className="py-8 text-center text-xs text-zinc-400 font-mono">Loading candidates...</p>
-                ) : candidates.length > 0 ? (
-                  candidates.map((c) => (
+                  <div className="rounded-lg border border-zinc-200 bg-white py-12 text-center text-xs text-zinc-400 font-mono dark:border-zinc-800 dark:bg-[#0c0d12]">
+                    Loading candidate pairs...
+                  </div>
+                ) : paginatedCandidates.length > 0 ? (
+                  paginatedCandidates.map((c) => (
                     <div
                       key={c.id}
-                      className="rounded-lg border border-zinc-200/80 bg-white p-4 shadow-2xs dark:border-zinc-800/80 dark:bg-[#0c0d12]"
+                      className="rounded-lg border border-zinc-200/80 bg-white p-4 shadow-2xs dark:border-zinc-800/80 dark:bg-[#0c0d12] transition-all hover:border-zinc-300 dark:hover:border-zinc-700"
                     >
                       <div className="flex items-center justify-between border-b border-zinc-100 pb-2.5 dark:border-zinc-800/80">
                         <div className="flex items-center gap-2.5">
@@ -1060,7 +1363,10 @@ export default function AppConsole() {
                             Pair #{c.id}
                           </span>
                           <span className="font-mono text-xs text-zinc-500">
-                            Match: <strong className="text-zinc-900 dark:text-zinc-100">{Math.round(c.confidence * 100)}%</strong>
+                            Match:{" "}
+                            <strong className="text-zinc-900 dark:text-zinc-100">
+                              {Math.round(c.confidence * 100)}%
+                            </strong>
                           </span>
                         </div>
 
@@ -1079,13 +1385,13 @@ export default function AppConsole() {
 
                           <button
                             onClick={() => handleUpdateCandidateStatus(c.id, "confirmed")}
-                            className="rounded border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-800 hover:bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300"
+                            className="rounded border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-800 hover:bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300 transition-colors"
                           >
                             Confirm
                           </button>
                           <button
                             onClick={() => handleUpdateCandidateStatus(c.id, "rejected")}
-                            className="rounded border border-rose-300 bg-rose-50 px-2 py-0.5 text-[11px] font-medium text-rose-800 hover:bg-rose-100 dark:border-rose-800 dark:bg-rose-950/40 dark:text-rose-300"
+                            className="rounded border border-rose-300 bg-rose-50 px-2 py-0.5 text-[11px] font-medium text-rose-800 hover:bg-rose-100 dark:border-rose-800 dark:bg-rose-950/40 dark:text-rose-300 transition-colors"
                           >
                             Reject
                           </button>
@@ -1142,67 +1448,148 @@ export default function AppConsole() {
                     </div>
                   ))
                 ) : (
-                  <p className="py-8 text-center text-xs text-zinc-400">
-                    No candidate pairs found. Trigger a scan above.
-                  </p>
+                  <div className="rounded-lg border border-zinc-200 bg-white py-12 text-center text-xs text-zinc-400 dark:border-zinc-800 dark:bg-[#0c0d12]">
+                    No candidate pairs found matching your filters.
+                  </div>
                 )}
               </div>
             )}
 
-            {/* Clusters View */}
+            {/* Clusters View (Accordion / Collapsible) */}
             {dedupeView === "clusters" && (
-              <div className="space-y-3">
-                {clusters.length > 0 ? (
-                  clusters.map((cl) => (
-                    <div
-                      key={cl.group_id}
-                      className="rounded-lg border border-zinc-200/80 bg-white p-4 shadow-2xs dark:border-zinc-800/80 dark:bg-[#0c0d12]"
-                    >
-                      <div className="flex items-center justify-between border-b border-zinc-100 pb-2 dark:border-zinc-800">
-                        <div>
-                          <span className="font-mono text-xs font-semibold text-zinc-800 dark:text-zinc-200">
-                            Cluster UUID: {cl.group_id}
-                          </span>
-                          <span className="font-mono text-zinc-400 text-xs ml-2">
-                            ({cl.lead_ids?.length || cl.leads?.length || 0} members)
-                          </span>
-                        </div>
-                        <span className="font-mono text-xs text-zinc-500">
-                          Confidence: {Math.round(cl.confidence * 100)}%
-                        </span>
-                      </div>
+              <div className="space-y-2.5">
+                {dedupeLoading ? (
+                  <div className="rounded-lg border border-zinc-200 bg-white py-12 text-center text-xs text-zinc-400 font-mono dark:border-zinc-800 dark:bg-[#0c0d12]">
+                    Loading transitive clusters...
+                  </div>
+                ) : paginatedClusters.length > 0 ? (
+                  paginatedClusters.map((cl) => {
+                    const isExpanded = expandedClusters[cl.group_id] ?? allClustersExpanded;
+                    const memberCount = cl.leads?.length || cl.lead_ids?.length || 0;
+                    const primaryLead = cl.leads && cl.leads.length > 0 ? cl.leads[0] : null;
 
-                      <div className="mt-2.5 space-y-1.5">
-                        {cl.leads?.map((m, idx) => (
-                          <div
-                            key={m.id}
-                            className={`flex items-center justify-between rounded px-2.5 py-1.5 text-xs ${
-                              idx === 0
-                                ? "border border-zinc-200 bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-800/50"
-                                : "bg-transparent text-zinc-600 dark:text-zinc-400"
-                            }`}
-                          >
-                            <div className="flex items-center gap-2">
-                              {idx === 0 && (
-                                <span className="rounded bg-zinc-900 px-1 font-mono text-[9px] font-bold text-white dark:bg-zinc-100 dark:text-zinc-900">
-                                  PRIMARY
-                                </span>
-                              )}
-                              <span className="font-mono text-[11px] text-zinc-400">#{m.id}</span>
-                              <span className="font-medium text-zinc-900 dark:text-zinc-100">
-                                {m.full_name || `${m.first_name || ""} ${m.last_name || ""}`.trim()}
+                    return (
+                      <div
+                        key={cl.group_id}
+                        className="rounded-lg border border-zinc-200/80 bg-white shadow-2xs dark:border-zinc-800/80 dark:bg-[#0c0d12] transition-all hover:border-zinc-300 dark:hover:border-zinc-700"
+                      >
+                        {/* Interactive Clickable Header */}
+                        <div
+                          onClick={() => toggleCluster(cl.group_id)}
+                          className="flex items-center justify-between p-3.5 cursor-pointer select-none border-b border-transparent hover:bg-zinc-50/60 dark:hover:bg-zinc-900/40 transition-colors"
+                        >
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <span className="text-zinc-400 text-xs font-mono select-none">
+                              {isExpanded ? "▼" : "▶"}
+                            </span>
+                            <span className="font-mono text-xs font-semibold text-zinc-900 dark:text-zinc-100">
+                              Cluster <span className="font-mono text-zinc-500 font-normal">{cl.group_id.slice(0, 8)}...{cl.group_id.slice(-6)}</span>
+                            </span>
+                            <span className="rounded-full bg-purple-50 dark:bg-purple-950/50 px-2 py-0.5 font-mono text-[10px] font-semibold text-purple-700 dark:text-purple-300 border border-purple-200/60 dark:border-purple-800/60">
+                              {memberCount} members
+                            </span>
+                            {!isExpanded && primaryLead && (
+                              <span className="hidden sm:inline-block text-xs text-zinc-500 truncate">
+                                • {primaryLead.full_name || `${primaryLead.first_name || ""} ${primaryLead.last_name || ""}`.trim()} ({primaryLead.company_name})
                               </span>
-                              <span className="font-mono text-zinc-400 text-[11px]">{m.email}</span>
-                            </div>
-                            <span className="text-zinc-400 text-[11px]">{m.company_name}</span>
+                            )}
                           </div>
-                        ))}
+
+                          <div className="flex items-center gap-3 shrink-0">
+                            <span className="rounded bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/60 px-2 py-0.5 font-mono text-xs font-semibold text-emerald-700 dark:text-emerald-300">
+                              {Math.round(cl.confidence * 100)}% match
+                            </span>
+                            <span className="text-xs text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200">
+                              {isExpanded ? "Collapse" : "Expand"}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Collapsible Member Detail List */}
+                        {isExpanded && (
+                          <div className="border-t border-zinc-100 p-3.5 dark:border-zinc-800/80 bg-zinc-50/40 dark:bg-zinc-900/20 space-y-2">
+                            <div className="flex items-center justify-between text-[11px] text-zinc-400 font-mono pb-1 border-b border-zinc-100 dark:border-zinc-800">
+                              <span>Full UUID: {cl.group_id}</span>
+                              <span>Transitive Resolution: Complete</span>
+                            </div>
+                            <div className="space-y-1.5">
+                              {cl.leads?.map((m, idx) => (
+                                <div
+                                  key={m.id}
+                                  className={`flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 rounded p-2 text-xs transition-colors ${
+                                    idx === 0
+                                      ? "border border-zinc-200 bg-white shadow-2xs dark:border-zinc-700/80 dark:bg-zinc-800/60"
+                                      : "border border-dashed border-zinc-200/80 bg-white/60 text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900/40 dark:text-zinc-400"
+                                  }`}
+                                >
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    {idx === 0 ? (
+                                      <span className="rounded bg-zinc-900 px-1.5 py-0.5 font-mono text-[9px] font-bold text-white dark:bg-zinc-100 dark:text-zinc-900">
+                                        PRIMARY
+                                      </span>
+                                    ) : (
+                                      <span className="rounded bg-zinc-100 px-1.5 py-0.5 font-mono text-[9px] font-semibold text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
+                                        DUPLICATE
+                                      </span>
+                                    )}
+                                    <span className="font-mono text-[11px] text-zinc-400 font-semibold">#{m.id}</span>
+                                    <span className="font-semibold text-zinc-900 dark:text-zinc-100">
+                                      {m.full_name || `${m.first_name || ""} ${m.last_name || ""}`.trim()}
+                                    </span>
+                                    <span className="font-mono text-zinc-500 text-[11px]">{m.email}</span>
+                                  </div>
+                                  <div className="flex items-center gap-3">
+                                    <span className="text-zinc-600 dark:text-zinc-400 text-[11px]">{m.company_name}</span>
+                                    <span className="font-mono text-zinc-400 text-[10px]">{m.phone_number || "—"}</span>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
                       </div>
-                    </div>
-                  ))
+                    );
+                  })
                 ) : (
-                  <p className="py-8 text-center text-xs text-zinc-400">No clusters formed yet.</p>
+                  <div className="rounded-lg border border-zinc-200 bg-white py-12 text-center text-xs text-zinc-400 dark:border-zinc-800 dark:bg-[#0c0d12]">
+                    No clusters matched your filter.
+                  </div>
                 )}
+              </div>
+            )}
+
+            {/* Bottom Compact Pagination Bar */}
+            {currentDedupeTotal > 0 && (
+              <div className="flex flex-col sm:flex-row items-center justify-between gap-2 border-t border-zinc-200/80 pt-3 text-xs dark:border-zinc-800/80">
+                <span className="font-mono text-[11px] text-zinc-500">
+                  Page {dedupePage} of {totalDedupePages} · ({currentDedupeTotal} total)
+                </span>
+
+                <div className="flex items-center gap-1.5">
+                  <button
+                    disabled={dedupePage <= 1}
+                    onClick={() => {
+                      setDedupePage((p) => Math.max(1, p - 1));
+                      scrollToDedupeTop();
+                    }}
+                    className="rounded border border-zinc-200 bg-white px-2.5 py-1 text-xs font-medium disabled:opacity-30 hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:bg-zinc-800"
+                  >
+                    Prev
+                  </button>
+                  <span className="px-2 font-mono text-[11px] text-zinc-500">
+                    {dedupePage} / {totalDedupePages}
+                  </span>
+                  <button
+                    disabled={dedupePage >= totalDedupePages}
+                    onClick={() => {
+                      setDedupePage((p) => Math.min(totalDedupePages, p + 1));
+                      scrollToDedupeTop();
+                    }}
+                    className="rounded border border-zinc-200 bg-white px-2.5 py-1 text-xs font-medium disabled:opacity-30 hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:bg-zinc-800"
+                  >
+                    Next
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -1477,6 +1864,19 @@ export default function AppConsole() {
               )}
             </div>
           </div>
+        )}
+
+        {/* Floating Back to Top Button */}
+        {showBackToTop && (
+          <button
+            onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
+            className="fixed bottom-6 right-6 z-50 flex items-center gap-1.5 rounded-full border border-zinc-300 bg-white/95 px-3 py-2 text-xs font-semibold text-zinc-800 shadow-xl backdrop-blur transition-all hover:bg-zinc-100 hover:scale-105 active:scale-95 dark:border-zinc-700 dark:bg-zinc-850 dark:text-zinc-100 dark:hover:bg-zinc-800"
+            title="Scroll to Top"
+            aria-label="Scroll to top"
+          >
+            <span>↑</span>
+            <span className="font-mono text-[11px]">Top</span>
+          </button>
         )}
       </main>
     </div>
